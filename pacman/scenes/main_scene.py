@@ -1,4 +1,7 @@
+import csv
 from typing import Generator
+
+import joblib
 
 from pygame import Rect, Surface, time
 from pygame.event import Event
@@ -53,6 +56,20 @@ class MainScene(BaseScene):
         self.__seeds.create_buffer()
 
         self.__update_score_text()
+
+        self.__ai_model = joblib.load("model.pkl")
+        self.__ai_mode = True
+
+        self.__csv_file = open("gameplay_data.csv", "a", newline="")
+        self.__csv_writer = csv.writer(self.__csv_file)
+        if self.__csv_file.tell() == 0:
+            self.__csv_writer.writerow([
+                "pacman_x", "pacman_y",
+                "nearest_ghost_dx", "nearest_ghost_dy", "nearest_ghost_dist",
+                "any_ghost_frightened",
+                "wall_up", "wall_down", "wall_left", "wall_right",
+                "action",
+            ])
 
     # region Private
 
@@ -199,13 +216,91 @@ class MainScene(BaseScene):
         for ghost in self.__ghosts:
             ghost.home_ai(self.__seeds_eaten)
 
+    def __record_frame(self) -> None:
+        if self.__csv_file.closed:
+            return
+
+        action = self.pacman._Pacman__feature_rotate
+        if action == "none":
+            return
+
+        pacman_cell = self.pacman.get_cell()
+        px, py = pacman_cell
+
+        nearest_dx, nearest_dy, nearest_dist = 0, 0, float("inf")
+        for ghost in self.__ghosts:
+            ghost_cell = ghost.get_cell()
+            dist = self.pacman.two_cells_dis(pacman_cell, ghost_cell)
+            if dist < nearest_dist:
+                nearest_dx = ghost_cell[0] - pacman_cell[0]
+                nearest_dy = ghost_cell[1] - pacman_cell[1]
+                nearest_dist = dist
+
+        any_frightened = int(any(ghost.state is GhostStateEnum.FRIGHTENED for ghost in self.__ghosts))
+
+        wall_up    = int(not self.pacman.can_rotate_to(3))
+        wall_down  = int(not self.pacman.can_rotate_to(1))
+        wall_left  = int(not self.pacman.can_rotate_to(2))
+        wall_right = int(not self.pacman.can_rotate_to(0))
+
+        self.__csv_writer.writerow([
+            px, py,
+            nearest_dx, nearest_dy, round(nearest_dist, 2),
+            any_frightened,
+            wall_up, wall_down, wall_left, wall_right,
+            action,
+        ])
+
+    def __ai_move(self) -> str:
+        pacman_cell = self.pacman.get_cell()
+        px, py = pacman_cell
+
+        nearest_dx, nearest_dy, nearest_dist = 0, 0, float("inf")
+        for ghost in self.__ghosts:
+            ghost_cell = ghost.get_cell()
+            dist = self.pacman.two_cells_dis(pacman_cell, ghost_cell)
+            if dist < nearest_dist:
+                nearest_dx = ghost_cell[0] - pacman_cell[0]
+                nearest_dy = ghost_cell[1] - pacman_cell[1]
+                nearest_dist = dist
+
+        any_frightened = int(any(ghost.state is GhostStateEnum.FRIGHTENED for ghost in self.__ghosts))
+
+        wall_up    = int(not self.pacman.can_rotate_to(3))
+        wall_down  = int(not self.pacman.can_rotate_to(1))
+        wall_left  = int(not self.pacman.can_rotate_to(2))
+        wall_right = int(not self.pacman.can_rotate_to(0))
+
+        features = [[
+            px, py,
+            nearest_dx, nearest_dy, round(nearest_dist, 2),
+            any_frightened,
+            wall_up, wall_down, wall_left, wall_right,
+        ]]
+
+        direction_index = {"up": 3, "down": 1, "left": 2, "right": 0}
+
+        proba = self.__ai_model.predict_proba(features)[0]
+        ranked = sorted(zip(self.__ai_model.classes_, proba), key=lambda x: x[1], reverse=True)
+
+        for action, _ in ranked:
+            if self.pacman.can_rotate_to(direction_index[action]):
+                return action
+
+        return self.pacman._Pacman__feature_rotate
+
     def __game_logic(self):
         super().process_logic()
         self.__play_sound()
         self.__ghost_ai()
+        if self.__ai_mode:
+            action = self.__ai_move()
+            self.pacman._Pacman__feature_rotate = action
+            self.pacman.go()
         self.__process_collision()
         self.__update_score_text()
         self.__check_game_status()
+        self.__record_frame()
 
     # endregion
 
@@ -246,5 +341,6 @@ class MainScene(BaseScene):
     def on_last_exit(self) -> None:
         for ch in SoundCh:
             SoundController.stop(ch)
+        self.__csv_file.close()
 
     # endregion
